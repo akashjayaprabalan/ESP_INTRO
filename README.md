@@ -8,17 +8,17 @@ The single-LED Arduino sketch is in:
 NanoEsp32LedWeb/NanoEsp32LedWeb.ino
 ```
 
-The four-LED plus motor-signal sketch is in:
+The four-LED Arduino sketch is in:
 
 ```text
-NanoEsp32LedMotorWeb/NanoEsp32LedMotorWeb.ino
+NanoEsp32FourLedWeb/NanoEsp32FourLedWeb.ino
 ```
 
 The older ESP-IDF files are still in this repository, but the beginner workflow below uses Arduino IDE.
 
-## Four Blinking LEDs + Motor Slider Sketch
+## Four LED Controller Sketch
 
-Use `NanoEsp32LedMotorWeb/NanoEsp32LedMotorWeb.ino` for the newer iPhone web app with four blinking LEDs and one vibration motor slider.
+Use `NanoEsp32FourLedWeb/NanoEsp32FourLedWeb.ino` for the newer iPhone web app with four steady LED controls.
 
 ### What It Controls
 
@@ -26,20 +26,21 @@ After upload, the Nano ESP32 hosts:
 
 | Setting | Value |
 | --- | --- |
-| WiFi network | `NanoESP32_LED_MOTOR` |
-| WiFi password | `ledmotor123` |
+| WiFi network | `NanoESP32_FOUR_LED` |
+| WiFi password | `fourled123` |
 | Web page | `http://192.168.4.1` |
 | Red LED | `D2` |
 | Blue LED | `D3` |
 | Yellow LED | `D4` |
 | Green LED | `D5` |
-| Motor PWM signal | `D6` |
 
-The iPhone page has ON/OFF buttons for each LED color, one motor strength slider from `0%` to `100%`, and an `ALL OFF` button. LEDs blink independently, so red, blue, yellow, and green can blink in any combination.
+The iPhone page has ON/OFF buttons for each LED color and an `ALL OFF` button. A color turns on when you tap `ON` and stays on until you tap `OFF` or `ALL OFF`.
 
 ### Wire The Four LEDs
 
 Unplug the Nano ESP32 from USB before wiring.
+
+For this sketch, use 4 small LEDs and 4 resistors, ideally 220-330 ohm.
 
 For each LED:
 
@@ -58,28 +59,11 @@ Use this table:
 
 LED polarity matters. The anode is usually the longer leg. The cathode is usually the shorter leg and often lines up with the flat side of the LED body.
 
-If the green LED on `D5` does not blink, reupload the latest sketch first. The sketch now uses the Nano ESP32 board labels `D2`, `D3`, `D4`, `D5`, and `D6` directly instead of raw numbers, which avoids Arduino IDE pin-numbering confusion. If it still does not work, unplug USB and test the same LED, resistor, and jumper wire on a known-working LED pin such as `D2`.
-
-### Motor Slider Safety
-
-The sketch outputs a PWM control signal on `D6`, but do not connect a bare `DC 3V 12000rpm` coin vibration motor directly to `D6`.
-
-Even one small coin motor can damage the Nano ESP32 because:
-
-- A GPIO pin is for low-current logic signals, not motor power.
-- A motor can draw a large startup current when it first begins spinning.
-- Motors are inductive loads and can create voltage spikes when switching.
-
-The motor slider is code-ready for a future safe driver. The simplest safe add-ons are:
-
-- a small transistor motor driver module, or
-- one NPN transistor, one base resistor, and one flyback diode circuit.
-
-Until you add a safe driver/module, test the motor slider from the iPhone and confirm the selected value in Serial Monitor only. Do not physically wire the bare motor to the Nano ESP32 pin.
+If the green LED on `D5` does not turn on, reupload the latest sketch first. The sketch uses the Nano ESP32 board labels `D2`, `D3`, `D4`, and `D5` directly instead of raw numbers, which avoids Arduino IDE pin-numbering confusion. If it still does not work, unplug USB and test the same LED, resistor, and jumper wire on a known-working LED pin such as `D2`.
 
 ### Upload The Four-LED Sketch
 
-1. In Arduino IDE, open `NanoEsp32LedMotorWeb/NanoEsp32LedMotorWeb.ino`.
+1. In Arduino IDE, open `NanoEsp32FourLedWeb/NanoEsp32FourLedWeb.ino`.
 2. Select `Tools > Board > Arduino ESP32 Boards > Arduino Nano ESP32`.
 3. Select `Tools > Pin Numbering > By Arduino pin (default)`.
 4. Select the Nano ESP32 port in `Tools > Port`.
@@ -90,26 +74,24 @@ Until you add a safe driver/module, test the motor slider from the iPhone and co
 9. Wait for messages like:
 
 ```text
-Nano ESP32 LED + motor web app is ready.
-WiFi network: NanoESP32_LED_MOTOR
-WiFi password: ledmotor123
+Nano ESP32 LED web app is ready.
+WiFi network: NanoESP32_FOUR_LED
+WiFi password: fourled123
 Open this address on your iPhone: http://192.168.4.1
-Do not connect a bare DC 3V 12000rpm motor directly to D6.
 ```
 
 ### Use The Four-LED Web App From Your iPhone
 
 1. On the iPhone, open `Settings > Wi-Fi`.
-2. Join `NanoESP32_LED_MOTOR`.
-3. Enter the password `ledmotor123`.
+2. Join `NanoESP32_FOUR_LED`.
+3. Enter the password `fourled123`.
 4. iOS may say the network has no internet. Stay connected to it.
 5. Open Safari.
 6. Go to `http://192.168.4.1`.
-7. Tap ON for any LED color and confirm that color blinks.
-8. Turn on multiple colors and confirm they blink together.
-9. Tap OFF for a color and confirm it stops blinking.
-10. Move the motor slider and confirm Serial Monitor prints the selected value.
-11. Tap `ALL OFF` and confirm every LED stops and the motor slider returns to `0%`.
+7. Tap `ON` for any LED color and confirm that color turns on.
+8. Turn on multiple colors and confirm they stay on together.
+9. Tap `OFF` for a color and confirm it turns off.
+10. Tap `ALL OFF` and confirm every LED turns off.
 
 ## What You Need
 
@@ -233,8 +215,8 @@ Optional: in Safari, tap Share, then `Add to Home Screen`. That gives you an app
 
 ```text
 .
-|-- NanoEsp32LedMotorWeb
-|   `-- NanoEsp32LedMotorWeb.ino
+|-- NanoEsp32FourLedWeb
+|   `-- NanoEsp32FourLedWeb.ino
 |-- NanoEsp32LedWeb
 |   `-- NanoEsp32LedWeb.ino
 |-- README.md

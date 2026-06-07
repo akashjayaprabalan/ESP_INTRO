@@ -15,22 +15,20 @@
 #include "nvs_flash.h"
 
 /*
- * ESP32 WiFi-controlled haptic and LED controller.
+ * ESP-IDF version of the four-LED web controller.
  *
- * This is written as literal C for ESP-IDF. The structure still uses familiar
- * setup() and loop() functions so it feels approachable for Arduino learners,
- * while app_main() is the ESP-IDF entry point.
+ * The Arduino sketch is the recommended Nano ESP32 workflow in this repo, and
+ * this C entry point is kept as a matching LED-only fallback.
  */
 
-#define WIFI_AP_SSID "ESP32_HAPTIC_LED"
-#define WIFI_AP_PASSWORD "esp32control"
+#define WIFI_AP_SSID "ESP32_LED_CONTROL"
+#define WIFI_AP_PASSWORD "ledcontrol"
 #define WIFI_AP_CHANNEL 1
 #define WIFI_AP_MAX_CONNECTIONS 4
 
-#define MOTOR_COUNT 4
 #define LED_COUNT 4
 
-static const char *TAG = "haptic_led";
+static const char *TAG = "led_controller";
 
 #define RETURN_IF_HTTP_ERROR(expression) do { \
     esp_err_t http_result = (expression); \
@@ -40,55 +38,44 @@ static const char *TAG = "haptic_led";
     } \
 } while (0)
 
-/*
- * GPIO pins are grouped in arrays so the output-control code scales cleanly.
- * Motors must be connected through transistor or MOSFET driver circuits.
- */
-static const gpio_num_t motor_pins[MOTOR_COUNT] = {
-    GPIO_NUM_25,
-    GPIO_NUM_26,
-    GPIO_NUM_27,
-    GPIO_NUM_33,
+typedef struct {
+    const char *name;
+    const char *label;
+    gpio_num_t pin;
+    bool is_on;
+} led_output_t;
+
+static led_output_t leds[LED_COUNT] = {
+    { "red", "Red", GPIO_NUM_16, false },
+    { "blue", "Blue", GPIO_NUM_17, false },
+    { "yellow", "Yellow", GPIO_NUM_18, false },
+    { "green", "Green", GPIO_NUM_19, false },
 };
 
-static const gpio_num_t led_pins[LED_COUNT] = {
-    GPIO_NUM_16,
-    GPIO_NUM_17,
-    GPIO_NUM_18,
-    GPIO_NUM_19,
-};
-
-static int active_motor = -1;
-static int active_led = -1;
 static httpd_handle_t web_server = NULL;
 
-static uint64_t build_output_pin_mask(void);
+static uint64_t build_led_pin_mask(void);
 static void init_nvs(void);
 static void init_gpio_outputs(void);
-static void set_all_outputs_low(void);
-static void all_outputs_off(void);
-static bool activate_motor(int index);
-static bool activate_led(int index);
+static void write_led(int index);
+static void set_led_state(int index, bool on);
+static void all_leds_off(void);
+static int find_led_index(const char *name);
 static void start_wifi_ap(void);
 static httpd_handle_t start_web_server(void);
+static esp_err_t send_button(httpd_req_t *req, const char *color, bool on, const char *label, const char *class_name);
 static esp_err_t send_control_page(httpd_req_t *req);
 static esp_err_t redirect_to_home(httpd_req_t *req);
-static bool read_index_query(httpd_req_t *req, int *index);
 static esp_err_t root_get_handler(httpd_req_t *req);
-static esp_err_t motor_get_handler(httpd_req_t *req);
 static esp_err_t led_get_handler(httpd_req_t *req);
 static esp_err_t off_get_handler(httpd_req_t *req);
 
-static uint64_t build_output_pin_mask(void)
+static uint64_t build_led_pin_mask(void)
 {
     uint64_t pin_mask = 0;
 
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-        pin_mask |= (1ULL << motor_pins[i]);
-    }
-
     for (int i = 0; i < LED_COUNT; i++) {
-        pin_mask |= (1ULL << led_pins[i]);
+        pin_mask |= (1ULL << leds[i].pin);
     }
 
     return pin_mask;
@@ -98,10 +85,6 @@ static void init_nvs(void)
 {
     esp_err_t result = nvs_flash_init();
 
-    /*
-     * WiFi stores calibration and settings in NVS. If the partition was created
-     * by another ESP-IDF version, erase it and initialize again.
-     */
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         result = nvs_flash_init();
@@ -113,7 +96,7 @@ static void init_nvs(void)
 static void init_gpio_outputs(void)
 {
     gpio_config_t output_config = {
-        .pin_bit_mask = build_output_pin_mask(),
+        .pin_bit_mask = build_led_pin_mask(),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -121,63 +104,51 @@ static void init_gpio_outputs(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&output_config));
-    all_outputs_off();
-    ESP_LOGI(TAG, "GPIO outputs initialized");
+    all_leds_off();
+    ESP_LOGI(TAG, "LED outputs initialized");
 }
 
-static void set_all_outputs_low(void)
+static void write_led(int index)
 {
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-        gpio_set_level(motor_pins[i], 0);
+    if (index < 0 || index >= LED_COUNT) {
+        return;
     }
 
-    for (int i = 0; i < LED_COUNT; i++) {
-        gpio_set_level(led_pins[i], 0);
-    }
+    gpio_set_level(leds[index].pin, leds[index].is_on ? 1 : 0);
 }
 
-static void all_outputs_off(void)
-{
-    set_all_outputs_low();
-    active_motor = -1;
-    active_led = -1;
-    ESP_LOGI(TAG, "All outputs OFF");
-}
-
-static bool activate_motor(int index)
-{
-    if (index < 0 || index >= MOTOR_COUNT) {
-        ESP_LOGW(TAG, "Rejected invalid motor index: %d", index);
-        return false;
-    }
-
-    /*
-     * Turn every output off first. This guarantees only the selected output is
-     * active after a button press.
-     */
-    set_all_outputs_low();
-    active_motor = index;
-    active_led = -1;
-    gpio_set_level(motor_pins[index], 1);
-
-    ESP_LOGI(TAG, "Active motor: Vibrator %d on GPIO %d", index + 1, motor_pins[index]);
-    return true;
-}
-
-static bool activate_led(int index)
+static void set_led_state(int index, bool on)
 {
     if (index < 0 || index >= LED_COUNT) {
         ESP_LOGW(TAG, "Rejected invalid LED index: %d", index);
-        return false;
+        return;
     }
 
-    set_all_outputs_low();
-    active_motor = -1;
-    active_led = index;
-    gpio_set_level(led_pins[index], 1);
+    leds[index].is_on = on;
+    write_led(index);
 
-    ESP_LOGI(TAG, "Active LED: LED %d on GPIO %d", index + 1, led_pins[index]);
-    return true;
+    ESP_LOGI(TAG, "%s LED %s on GPIO %d", leds[index].label, on ? "ON" : "OFF", leds[index].pin);
+}
+
+static void all_leds_off(void)
+{
+    for (int i = 0; i < LED_COUNT; i++) {
+        leds[i].is_on = false;
+        write_led(i);
+    }
+
+    ESP_LOGI(TAG, "All LEDs OFF");
+}
+
+static int find_led_index(const char *name)
+{
+    for (int i = 0; i < LED_COUNT; i++) {
+        if (strcmp(name, leds[i].name) == 0) {
+            return i;
+        }
+    }
+
+    return -1;
 }
 
 static void start_wifi_ap(void)
@@ -226,13 +197,6 @@ static httpd_handle_t start_web_server(void)
         .user_ctx = NULL,
     };
 
-    httpd_uri_t motor_route = {
-        .uri = "/motor",
-        .method = HTTP_GET,
-        .handler = motor_get_handler,
-        .user_ctx = NULL,
-    };
-
     httpd_uri_t led_route = {
         .uri = "/led",
         .method = HTTP_GET,
@@ -249,7 +213,6 @@ static httpd_handle_t start_web_server(void)
 
     ESP_ERROR_CHECK(httpd_start(&server, &config));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root_route));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &motor_route));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &led_route));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &off_route));
 
@@ -257,15 +220,16 @@ static httpd_handle_t start_web_server(void)
     return server;
 }
 
-static esp_err_t send_button(httpd_req_t *req, const char *href, const char *class_name, const char *label)
+static esp_err_t send_button(httpd_req_t *req, const char *color, bool on, const char *label, const char *class_name)
 {
     char button_html[192];
     int written = snprintf(
         button_html,
         sizeof(button_html),
-        "<a class=\"button %s\" href=\"%s\">%s</a>",
+        "<a class=\"button %s\" href=\"/led?color=%s&on=%d\">%s</a>",
         class_name,
-        href,
+        color,
+        on ? 1 : 0,
         label);
 
     if (written < 0 || written >= (int)sizeof(button_html)) {
@@ -277,17 +241,6 @@ static esp_err_t send_button(httpd_req_t *req, const char *href, const char *cla
 
 static esp_err_t send_control_page(httpd_req_t *req)
 {
-    char status_html[128];
-    const char *status_text = "All outputs are off";
-
-    if (active_motor >= 0) {
-        snprintf(status_html, sizeof(status_html), "Vibrator %d is active", active_motor + 1);
-        status_text = status_html;
-    } else if (active_led >= 0) {
-        snprintf(status_html, sizeof(status_html), "LED %d is active", active_led + 1);
-        status_text = status_html;
-    }
-
     httpd_resp_set_type(req, "text/html");
 
     RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req,
@@ -296,47 +249,43 @@ static esp_err_t send_control_page(httpd_req_t *req)
         "<head>"
         "<meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<title>ESP32 Haptic LED Control</title>"
+        "<title>ESP32 LED Control</title>"
         "<style>"
         ":root{font-family:Arial,sans-serif;color:#17202a;background:#f4f7fb;}"
         "*{box-sizing:border-box;}"
         "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}"
-        "main{width:min(480px,100%);}"
-        "h1{font-size:1.65rem;margin:0 0 8px;text-align:center;}"
-        ".status{margin:0 0 18px;padding:12px 14px;border-radius:8px;background:#ffffff;border:1px solid #d9e2ec;text-align:center;font-weight:700;}"
-        ".section-title{font-size:.8rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#52606d;margin:18px 0 10px;}"
+        "main{width:min(520px,100%);}"
+        "h1{font-size:1.65rem;margin:0 0 18px;text-align:center;}"
         ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}"
-        ".button{display:flex;align-items:center;justify-content:center;min-height:62px;padding:14px;border-radius:8px;text-decoration:none;color:#fff;font-size:1.05rem;font-weight:700;box-shadow:0 6px 14px rgba(18,38,63,.16);}"
-        ".motor{background:#2563eb;}"
-        ".led{background:#059669;}"
-        ".off{width:100%;margin-top:18px;background:#dc2626;min-height:68px;}"
-        ".button:active{transform:translateY(1px);box-shadow:0 3px 8px rgba(18,38,63,.2);}"
-        "@media(max-width:360px){.grid{grid-template-columns:1fr;}h1{font-size:1.4rem;}.button{font-size:1rem;}}"
+        ".panel{padding:12px;border-radius:8px;background:#fff;border:1px solid #d9e2ec;}"
+        ".title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-weight:700;}"
+        ".state{font-size:.8rem;color:#52606d;}"
+        ".actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;}"
+        ".button{display:flex;align-items:center;justify-content:center;min-height:48px;padding:12px;border-radius:8px;text-decoration:none;color:#fff;font-weight:700;}"
+        ".on{background:#059669;}"
+        ".off{background:#dc2626;}"
+        ".all-off{width:100%;margin-top:18px;background:#111827;min-height:58px;}"
+        "@media(max-width:380px){.grid{grid-template-columns:1fr;}h1{font-size:1.4rem;}}"
         "</style>"
         "</head>"
         "<body>"
         "<main>"
-        "<h1>ESP32 Control</h1>"));
+        "<h1>ESP32 LED Control</h1>"
+        "<div class=\"grid\">"));
 
-    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "<div class=\"status\">"));
-    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, status_text));
+    for (int i = 0; i < LED_COUNT; i++) {
+        RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "<div class=\"panel\"><div class=\"title\"><span>"));
+        RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, leds[i].label));
+        RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</span><span class=\"state\">"));
+        RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, leds[i].is_on ? "ON" : "OFF"));
+        RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</span></div><div class=\"actions\">"));
+        RETURN_IF_HTTP_ERROR(send_button(req, leds[i].name, true, "ON", "on"));
+        RETURN_IF_HTTP_ERROR(send_button(req, leds[i].name, false, "OFF", "off"));
+        RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</div></div>"));
+    }
+
     RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</div>"));
-
-    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "<div class=\"section-title\">Vibration Motors</div><div class=\"grid\">"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/motor?index=0", "motor", "Vibrator 1"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/motor?index=1", "motor", "Vibrator 2"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/motor?index=2", "motor", "Vibrator 3"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/motor?index=3", "motor", "Vibrator 4"));
-    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</div>"));
-
-    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "<div class=\"section-title\">LEDs</div><div class=\"grid\">"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/led?index=0", "led", "LED 1"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/led?index=1", "led", "LED 2"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/led?index=2", "led", "LED 3"));
-    RETURN_IF_HTTP_ERROR(send_button(req, "/led?index=3", "led", "LED 4"));
-    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</div>"));
-
-    RETURN_IF_HTTP_ERROR(send_button(req, "/off", "off", "ALL OFF"));
+    RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "<a class=\"button all-off\" href=\"/off\">ALL OFF</a>"));
     RETURN_IF_HTTP_ERROR(httpd_resp_sendstr_chunk(req, "</main></body></html>"));
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -348,69 +297,41 @@ static esp_err_t redirect_to_home(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
-static bool read_index_query(httpd_req_t *req, int *index)
-{
-    char query[64];
-    char value[8];
-    char *end = NULL;
-    long parsed_value;
-
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-        return false;
-    }
-
-    if (httpd_query_key_value(query, "index", value, sizeof(value)) != ESP_OK) {
-        return false;
-    }
-
-    parsed_value = strtol(value, &end, 10);
-    if (end == value || *end != '\0') {
-        return false;
-    }
-
-    *index = (int)parsed_value;
-    return true;
-}
-
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     return send_control_page(req);
 }
 
-static esp_err_t motor_get_handler(httpd_req_t *req)
-{
-    int index = -1;
-
-    if (!read_index_query(req, &index) || !activate_motor(index)) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid motor index. Use 0 through 3.");
-    }
-
-    ESP_LOGI(TAG, "Button press: Vibrator %d", index + 1);
-    return redirect_to_home(req);
-}
-
 static esp_err_t led_get_handler(httpd_req_t *req)
 {
-    int index = -1;
+    char query[96];
+    char color[16];
+    char on_value[4];
 
-    if (!read_index_query(req, &index) || !activate_led(index)) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid LED index. Use 0 through 3.");
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "color", color, sizeof(color)) != ESP_OK ||
+        httpd_query_key_value(query, "on", on_value, sizeof(on_value)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Use color and on query parameters.");
     }
 
-    ESP_LOGI(TAG, "Button press: LED %d", index + 1);
+    int led_index = find_led_index(color);
+    if (led_index < 0 || (strcmp(on_value, "0") != 0 && strcmp(on_value, "1") != 0)) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid LED request.");
+    }
+
+    set_led_state(led_index, strcmp(on_value, "1") == 0);
     return redirect_to_home(req);
 }
 
 static esp_err_t off_get_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "Button press: ALL OFF");
-    all_outputs_off();
+    all_leds_off();
     return redirect_to_home(req);
 }
 
 void setup(void)
 {
-    ESP_LOGI(TAG, "Starting ESP32 haptic and LED controller");
+    ESP_LOGI(TAG, "Starting ESP32 LED controller");
     init_nvs();
     init_gpio_outputs();
     start_wifi_ap();
@@ -420,10 +341,6 @@ void setup(void)
 
 void loop(void)
 {
-    /*
-     * All control work is event-driven by HTTP requests. This delay keeps the
-     * main task alive without blocking the WiFi or web-server tasks.
-     */
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
