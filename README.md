@@ -58,6 +58,8 @@ Use this table:
 
 LED polarity matters. The anode is usually the longer leg. The cathode is usually the shorter leg and often lines up with the flat side of the LED body.
 
+If the green LED on `D5` does not blink, reupload the latest sketch first. The sketch now uses the Nano ESP32 board labels `D2`, `D3`, `D4`, `D5`, and `D6` directly instead of raw numbers, which avoids Arduino IDE pin-numbering confusion. If it still does not work, unplug USB and test the same LED, resistor, and jumper wire on a known-working LED pin such as `D2`.
+
 ### Motor Slider Safety
 
 The sketch outputs a PWM control signal on `D6`, but do not connect a bare `DC 3V 12000rpm` coin vibration motor directly to `D6`.

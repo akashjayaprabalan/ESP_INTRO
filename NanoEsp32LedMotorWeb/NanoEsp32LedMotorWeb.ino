@@ -1,7 +1,9 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
-
+#if !defined(D2) || !defined(D3) || !defined(D4) || !defined(D5) || !defined(D6)
+#error "Select Arduino Nano ESP32 in Arduino IDE before compiling this sketch."
+#endif
 
 constexpr uint16_t WEB_PORT = 80;
 constexpr unsigned long BLINK_INTERVAL_MS = 500;
@@ -18,14 +20,14 @@ struct BlinkLed {
 };
 
 BlinkLed leds[] = {
-  { "red", "Red", 2, false, false },
-  { "blue", "Blue", 3, false, false },
-  { "yellow", "Yellow", 4, false, false },
-  { "green", "Green", 5, false, false },
+  { "red", "Red", D2, false, false },
+  { "blue", "Blue", D3, false, false },
+  { "yellow", "Yellow", D4, false, false },
+  { "green", "Green", D5, false, false },
 };
 
 constexpr size_t LED_COUNT = sizeof(leds) / sizeof(leds[0]);
-constexpr uint8_t MOTOR_PIN = 6;
+constexpr uint8_t MOTOR_PIN = D6;
 constexpr uint8_t MOTOR_MIN_PERCENT = 0;
 constexpr uint8_t MOTOR_MAX_PERCENT = 100;
 
